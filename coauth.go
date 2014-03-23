@@ -8,6 +8,7 @@ import (
   "io"
   "net"
   "net/http"
+  "strings"
 )
 
 // Configuration for the oauth consumer
@@ -96,6 +97,17 @@ func handleConn(s net.Conn, c *oauth.Config) (string, error) {
   return code, nil
 }
 
+func urlFor(addr net.Addr) string {
+  a := addr.String()
+
+  ix := strings.LastIndex(a, ":")
+  if ix < 0 {
+    return a
+  }
+
+  return fmt.Sprintf("http://localhost%s/", a[ix:])
+}
+
 func newServer(c *oauth.Config) (*server, error) {
   ch := make(chan interface{})
 
@@ -104,7 +116,7 @@ func newServer(c *oauth.Config) (*server, error) {
     return nil, err
   }
 
-  c.RedirectURL = fmt.Sprintf("http://%s/", l.Addr().String())
+  c.RedirectURL = urlFor(l.Addr())
 
   go func() {
     for {
