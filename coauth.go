@@ -10,12 +10,24 @@ import (
   "net/http"
 )
 
+// Configuration for the oauth consumer
 type Config struct {
-  ClientId     string
+  // the client identifier
+  ClientId string
+
+  // The client secret, though since this is an installed applicaiton, this is
+  // not a secret at all.
   ClientSecret string
-  Scope        string
-  AuthUrl      string
-  TokenUrl     string
+
+  // The level of access being requested. Multiple scope values should
+  // be separated by a space.
+  Scope string
+
+  // The url the user will need to visit in order to grant access.
+  AuthUrl string
+
+  // The url used to fetch a proper token.
+  TokenUrl string
 }
 
 func (c *Config) config() *oauth.Config {
@@ -28,14 +40,18 @@ func (c *Config) config() *oauth.Config {
   }
 }
 
+// An http.RoundTripper that signs with the underlying OAuth token.
 type Client struct {
   t *oauth.Transport
 }
 
+// Provided for http.RoundTripper. Dispatches a Request and parses
+// the Response.
 func (c *Client) RoundTrip(r *http.Request) (*http.Response, error) {
   return c.t.RoundTrip(r)
 }
 
+// Serialize the client's token into the writer.
 func (c *Client) Write(w io.Writer) error {
   return gob.NewEncoder(w).Encode(c.t.Token)
 }
@@ -134,6 +150,7 @@ func (s *server) waitForCode() (string, error) {
   panic("unreachable")
 }
 
+// Deserialize a token from the given reader to resurrect a Client.
 func ReadClient(r io.Reader, c *Config) (*Client, error) {
   var t oauth.Token
 
@@ -149,6 +166,7 @@ func ReadClient(r io.Reader, c *Config) (*Client, error) {
   }, nil
 }
 
+// Perform the full authentication flow.
 func Authenticate(c *Config, f func(string) error) (*Client, error) {
   cfg := c.config()
 
