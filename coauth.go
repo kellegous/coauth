@@ -133,7 +133,7 @@ func ReadClient(r io.Reader, c *Config) (*Client, error) {
   }, nil
 }
 
-func Authenticate(c *Config) (*Client, error) {
+func Authenticate(c *Config, f func(string) error) (*Client, error) {
   s, err := newServer()
   if err != nil {
     return nil, err
@@ -146,7 +146,9 @@ func Authenticate(c *Config) (*Client, error) {
     return nil, err
   }
 
-  fmt.Printf("Please visit the URL: %s\n", u)
+  if err := f(u); err != nil {
+    return nil, err
+  }
 
   code, err := s.waitForCode()
   if err != nil {
