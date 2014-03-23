@@ -2,11 +2,8 @@ package coauth
 
 import (
   "bufio"
-  "bytes"
   "code.google.com/p/goauth2/oauth"
   "encoding/gob"
-  "encoding/json"
-  "errors"
   "fmt"
   "io"
   "net"
@@ -21,14 +18,13 @@ type Config struct {
   TokenUrl     string
 }
 
-func (c *Config) config(redirectUrl string) *oauth.Config {
+func (c *Config) config() *oauth.Config {
   return &oauth.Config{
     ClientId:     c.ClientId,
     ClientSecret: c.ClientSecret,
     Scope:        c.Scope,
     AuthURL:      c.AuthUrl,
     TokenURL:     c.TokenUrl,
-    RedirectURL:  redirectUrl,
   }
 }
 
@@ -45,77 +41,97 @@ func (c *Client) Write(w io.Writer) error {
 }
 
 type server struct {
-  l net.Listener
+  c chan interface{}
+  u string
 }
 
-func newServer() (*server, error) {
-  l, err := net.Listen("tcp", "localhost:0")
-  if err != nil {
-    return nil, err
-  }
+func handleConn(s net.Conn, c *oauth.Config) (string, error) {
+  defer s.Close()
 
-  return &server{l}, nil
-}
-
-func (s *server) url() string {
-  return fmt.Sprintf("http://%s/", s.l.Addr().String())
-}
-
-func (s *server) waitForCode() (string, error) {
-  defer s.l.Close()
-
-  c, err := s.l.Accept()
-  if err != nil {
-    return "", err
-  }
-  defer c.Close()
-
-  req, err := http.ReadRequest(bufio.NewReader(c))
+  req, err := http.ReadRequest(bufio.NewReader(s))
   if err != nil {
     return "", err
   }
 
   code := req.FormValue("code")
-  if code == "" {
-    return "", errors.New("Auth service did not return a code.")
-  }
 
   var res http.Response
   res.Header = http.Header(map[string][]string{})
-  res.Header.Set("Content-Type", "text/html;charset=utf8")
 
-  res.Write(c)
-  fmt.Fprintln(c, "<h1>All Done! You can close this window now.</h1>")
+  if code == "" {
+    res.StatusCode = http.StatusTemporaryRedirect
+    res.Header.Set("Location", c.AuthCodeURL(""))
+    if err := res.Write(s); err != nil {
+      return "", err
+    }
+    if _, err := fmt.Fprintf(s, "%s\n", c.RedirectURL); err != nil {
+      return "", err
+    }
+  } else {
+    res.Header.Set("Content-Type", "text/html;charset=utf-8")
+    if err := res.Write(s); err != nil {
+      return "", err
+    }
+    if _, err := fmt.Fprintln(s, "<h1>All Done! You can close this window now.</h1>"); err != nil {
+      return "", err
+    }
+  }
 
   return code, nil
 }
 
-func shortenUrl(url string) (string, error) {
-  b, err := json.Marshal(map[string]string{
-    "kind":    "urlshortener#url",
-    "longUrl": url,
-  })
+func newServer(c *oauth.Config) (*server, error) {
+  ch := make(chan interface{})
+
+  l, err := net.Listen("tcp", "localhost:0")
   if err != nil {
-    return "", err
+    return nil, err
   }
 
-  res, err := http.Post("https://www.googleapis.com/urlshortener/v1/url",
-    "application/json",
-    bytes.NewReader(b))
-  if err != nil {
-    return "", err
-  }
-  defer res.Body.Close()
+  c.RedirectURL = fmt.Sprintf("http://%s/", l.Addr().String())
 
-  var s struct {
-    Id string `json:"id"`
-  }
+  go func() {
+    for {
+      s, err := l.Accept()
+      if err != nil {
+        ch <- err
+        return
+      }
 
-  if err := json.NewDecoder(res.Body).Decode(&s); err != nil {
-    return "", err
-  }
+      code, err := handleConn(s, c)
+      if err != nil {
+        ch <- err
+        return
+      }
 
-  return s.Id, nil
+      if code == "" {
+        continue
+      }
+
+      ch <- code
+      return
+    }
+  }()
+
+  return &server{
+    c: ch,
+    u: c.RedirectURL,
+  }, nil
+}
+
+func (s *server) url() string {
+  return s.u
+}
+
+func (s *server) waitForCode() (string, error) {
+  v := <-s.c
+  switch t := v.(type) {
+  case error:
+    return "", t
+  case string:
+    return t, nil
+  }
+  panic("unreachable")
 }
 
 func ReadClient(r io.Reader, c *Config) (*Client, error) {
@@ -127,26 +143,21 @@ func ReadClient(r io.Reader, c *Config) (*Client, error) {
 
   return &Client{
     t: &oauth.Transport{
-      Config: c.config(""),
+      Config: c.config(),
       Token:  &t,
     },
   }, nil
 }
 
 func Authenticate(c *Config, f func(string) error) (*Client, error) {
-  s, err := newServer()
+  cfg := c.config()
+
+  s, err := newServer(cfg)
   if err != nil {
     return nil, err
   }
 
-  cfg := c.config(s.url())
-
-  u, err := shortenUrl(cfg.AuthCodeURL(""))
-  if err != nil {
-    return nil, err
-  }
-
-  if err := f(u); err != nil {
+  if err := f(s.url()); err != nil {
     return nil, err
   }
 
