@@ -11,6 +11,51 @@ import (
   "strings"
 )
 
+var allDonePage = `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>All Done</title>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <link href='http://fonts.googleapis.com/css?family=Raleway:400,100' rel='stylesheet' type='text/css'>
+  <style>
+    body {
+      background-color: #fff;
+      font-family: 'Raleway', sans-serif;
+      font-size: 16px;
+      color: #999;
+    }
+    section {
+      background-color: #f6f6f6;
+      width: 400px;
+      margin: 200px auto;
+      padding: 100px;
+      border-radius: 4px;
+      border: 1px solid #999;
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+    h1, h2 {
+      margin:0;
+      padding:0;
+      text-shadow: 1px 1px 0 #fff;
+    }
+    h1 {
+      font-size: 40px;
+    }
+    h2 {
+      font-size: 24px;
+    }
+  </style>
+</head>
+<body>
+  <section>
+    <h1>All Done</h1>
+    <h2>You can close this window now.</h2>
+  </section>
+</body>
+</html>
+`
+
 // Configuration for the oauth consumer
 type Config struct {
   // the client identifier
@@ -89,7 +134,7 @@ func handleConn(s net.Conn, c *oauth.Config) (string, error) {
     if err := res.Write(s); err != nil {
       return "", err
     }
-    if _, err := fmt.Fprintln(s, "<h1>All Done! You can close this window now.</h1>"); err != nil {
+    if _, err := fmt.Fprintln(s, allDonePage); err != nil {
       return "", err
     }
   }
