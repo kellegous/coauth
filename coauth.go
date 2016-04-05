@@ -1,14 +1,19 @@
 package coauth
 
 import (
-  "bufio"
-  "code.google.com/p/goauth2/oauth"
-  "encoding/gob"
-  "fmt"
-  "io"
-  "net"
-  "net/http"
-  "strings"
+	"bufio"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"io/ioutil"
+	"net"
+	"net/http"
+	"os"
+	"strings"
+
+	"golang.org/x/net/context"
+	"golang.org/x/oauth2"
 )
 
 var allDonePage = `
@@ -56,198 +61,191 @@ var allDonePage = `
 </html>
 `
 
-// Configuration for the oauth consumer
-type Config struct {
-  // the client identifier
-  ClientId string
-
-  // The client secret, though since this is an installed applicaiton, this is
-  // not a secret at all.
-  ClientSecret string
-
-  // The level of access being requested. Multiple scope values should
-  // be separated by a space.
-  Scope string
-
-  // The url the user will need to visit in order to grant access.
-  AuthUrl string
-
-  // The url used to fetch a proper token.
-  TokenUrl string
-}
-
-func (c *Config) config() *oauth.Config {
-  return &oauth.Config{
-    ClientId:     c.ClientId,
-    ClientSecret: c.ClientSecret,
-    Scope:        c.Scope,
-    AuthURL:      c.AuthUrl,
-    TokenURL:     c.TokenUrl,
-  }
-}
-
-// An http.RoundTripper that signs with the underlying OAuth token.
-type Client struct {
-  t *oauth.Transport
-}
-
-// Provided for http.RoundTripper. Dispatches a Request and parses
-// the Response.
-func (c *Client) RoundTrip(r *http.Request) (*http.Response, error) {
-  return c.t.RoundTrip(r)
-}
-
-// Serialize the client's token into the writer.
-func (c *Client) Write(w io.Writer) error {
-  return gob.NewEncoder(w).Encode(c.t.Token)
-}
-
-type server struct {
-  c chan interface{}
-  u string
-}
-
-func handleConn(s net.Conn, c *oauth.Config) (string, error) {
-  defer s.Close()
-
-  req, err := http.ReadRequest(bufio.NewReader(s))
-  if err != nil {
-    return "", err
-  }
-
-  code := req.FormValue("code")
-
-  var res http.Response
-  res.Header = http.Header(map[string][]string{})
-
-  if code == "" {
-    res.StatusCode = http.StatusTemporaryRedirect
-    res.Header.Set("Location", c.AuthCodeURL(""))
-    if err := res.Write(s); err != nil {
-      return "", err
-    }
-    if _, err := fmt.Fprintf(s, "%s\n", c.RedirectURL); err != nil {
-      return "", err
-    }
-  } else {
-    res.Header.Set("Content-Type", "text/html;charset=utf-8")
-    if err := res.Write(s); err != nil {
-      return "", err
-    }
-    if _, err := fmt.Fprintln(s, allDonePage); err != nil {
-      return "", err
-    }
-  }
-
-  return code, nil
-}
-
 func urlFor(addr net.Addr) string {
-  a := addr.String()
+	a := addr.String()
 
-  ix := strings.LastIndex(a, ":")
-  if ix < 0 {
-    return a
-  }
+	ix := strings.LastIndex(a, ":")
+	if ix < 0 {
+		return a
+	}
 
-  return fmt.Sprintf("http://localhost%s/", a[ix:])
+	return fmt.Sprintf("http://localhost%s/", a[ix:])
 }
 
-func newServer(c *oauth.Config) (*server, error) {
-  ch := make(chan interface{})
+func serveConn(c net.Conn, cfg *oauth2.Config) (string, error) {
+	defer c.Close()
 
-  l, err := net.Listen("tcp", "localhost:0")
-  if err != nil {
-    return nil, err
-  }
+	req, err := http.ReadRequest(bufio.NewReader(c))
+	if err != nil {
+		return "", err
+	}
 
-  c.RedirectURL = urlFor(l.Addr())
+	var res http.Response
+	res.Header = http.Header(map[string][]string{})
 
-  go func() {
-    for {
-      s, err := l.Accept()
-      if err != nil {
-        ch <- err
-        return
-      }
+	code := req.FormValue("code")
+	if code == "" {
+		url := cfg.AuthCodeURL("")
+		res.StatusCode = http.StatusTemporaryRedirect
+		res.Header.Set("Location", url)
+		if err := res.Write(c); err != nil {
+			return "", err
+		}
 
-      code, err := handleConn(s, c)
-      if err != nil {
-        ch <- err
-        return
-      }
+		if _, err := fmt.Fprintf(c, "%s\n", url); err != nil {
+			return "", err
+		}
+	} else {
+		res.StatusCode = http.StatusOK
+		res.ContentLength = int64(len(allDonePage))
+		res.Header.Set("Content-Type", "text/html;charset=utf-8")
+		if err := res.Write(c); err != nil {
+			return "", err
+		}
 
-      if code == "" {
-        continue
-      }
+		if _, err := fmt.Fprintln(c, allDonePage); err != nil {
+			return "", err
+		}
+	}
 
-      ch <- code
-      return
-    }
-  }()
-
-  return &server{
-    c: ch,
-    u: c.RedirectURL,
-  }, nil
+	return code, nil
 }
 
-func (s *server) url() string {
-  return s.u
+func auth(cfg *oauth2.Config, fn func(string) error) (*oauth2.Token, error) {
+	ch := make(chan interface{})
+
+	l, err := net.Listen("tcp", ":0")
+	if err != nil {
+		return nil, err
+	}
+	defer l.Close()
+
+	cfg.RedirectURL = urlFor(l.Addr())
+	if err := fn(cfg.RedirectURL); err != nil {
+		return nil, err
+	}
+
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				ch <- err
+				return
+			}
+
+			code, err := serveConn(c, cfg)
+			if err != nil {
+				ch <- err
+				return
+			}
+
+			if code == "" {
+				continue
+			}
+
+			ch <- code
+			return
+		}
+	}()
+
+	v := <-ch
+	switch t := v.(type) {
+	case error:
+		return nil, t
+	case string:
+		return cfg.Exchange(context.Background(), t)
+	}
+
+	panic("unreachable")
 }
 
-func (s *server) waitForCode() (string, error) {
-  v := <-s.c
-  switch t := v.(type) {
-  case error:
-    return "", t
-  case string:
-    return t, nil
-  }
-  panic("unreachable")
+// Encode an oauth2 token as a string.
+func encodeToken(t *oauth2.Token) ([]byte, error) {
+	b, err := json.Marshal(t)
+	if err != nil {
+		return nil, err
+	}
+
+	dst := make([]byte, base64.URLEncoding.EncodedLen(len(b)))
+	base64.URLEncoding.Encode(dst, b)
+	return dst, nil
 }
 
-// Deserialize a token from the given reader to resurrect a Client.
-func ReadClient(r io.Reader, c *Config) (*Client, error) {
-  var t oauth.Token
+// Decode an oauth2 token from a string.
+func decodeToken(s []byte, t *oauth2.Token) error {
+	dst := make([]byte, base64.URLEncoding.DecodedLen(len(s)))
 
-  if err := gob.NewDecoder(r).Decode(&t); err != nil {
-    return nil, err
-  }
+	n, err := base64.URLEncoding.Decode(dst, s)
+	if err != nil {
+		return err
+	}
 
-  return &Client{
-    t: &oauth.Transport{
-      Config: c.config(),
-      Token:  &t,
-    },
-  }, nil
+	return json.Unmarshal(dst[:n], t)
+}
+
+func Read(cfg *oauth2.Config, r io.Reader) (*http.Client, error) {
+	t := &oauth2.Token{}
+
+	b, err := ioutil.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := decodeToken(b, t); err != nil {
+		return nil, err
+	}
+
+	return cfg.Client(context.Background(), t), nil
+}
+
+func ReadFile(cfg *oauth2.Config, filename string) (*http.Client, error) {
+	r, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+
+	return Read(cfg, r)
+}
+
+func saveFile(t *oauth2.Token, filename string) error {
+	b, err := encodeToken(t)
+	if err != nil {
+		return err
+	}
+
+	w, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer w.Close()
+
+	if _, err := w.Write(b); err != nil {
+		return err
+	}
+
+	_, err = w.Write([]byte{'\n'})
+	return err
 }
 
 // Perform the full authentication flow.
-func Authenticate(c *Config, f func(string) error) (*Client, error) {
-  cfg := c.config()
+func Auth(
+	cfg *oauth2.Config,
+	filename string,
+	f func(string) error) (*http.Client, error) {
 
-  s, err := newServer(cfg)
-  if err != nil {
-    return nil, err
-  }
+	if c, err := ReadFile(cfg, filename); err == nil {
+		return c, nil
+	}
 
-  if err := f(s.url()); err != nil {
-    return nil, err
-  }
+	t, err := auth(cfg, f)
+	if err != nil {
+		return nil, err
+	}
 
-  code, err := s.waitForCode()
-  if err != nil {
-    return nil, err
-  }
+	if err := saveFile(t, filename); err != nil {
+		return nil, err
+	}
 
-  t := &oauth.Transport{
-    Config: cfg,
-  }
-
-  if _, err := t.Exchange(code); err != nil {
-    return nil, err
-  }
-
-  return &Client{t: t}, nil
+	return cfg.Client(context.Background(), t), nil
 }
